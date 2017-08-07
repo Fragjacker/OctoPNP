@@ -1,6 +1,7 @@
 *.pyc
 *.swp
 .idea
+.tags
 *.iml
 *.tiff
 *.png
