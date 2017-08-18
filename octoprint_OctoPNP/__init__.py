@@ -34,7 +34,7 @@ import shutil
 from .SmdParts import SmdParts
 from .ImageProcessing import ImageProcessing
 
-from .GCode_processor import CameraGCodeExtraction
+from .GCode_processor import CameraGCodeExtraction as GCodex
 from .CameraCoordinateGetter import CameraGridMaker,ImageOperations
 
 
@@ -165,14 +165,19 @@ class OctoPNP(octoprint.plugin.StartupPlugin,
     def on_event(self, event, payload):
         #extraxt part informations from inline xmly
         if event == "FileSelected":
+            #Initilize the Cameraextractor Class
+            newCamExtractor = GCodex(0.25,'T0')
+            #Retrieve the basefolder for the GCode uploads
+            uploadsPath = self._settings.global_get_basefolder("uploads") + "\\" + payload.get("path")
+
             self._currentPart = None
             xml = "";
-            f = open(payload.get("file"), 'r')
+            f = self._openGCodeFiles(uploadsPath)
+            #f = open(testPath, 'r')
 
             #Extract the GCodes for the CameraPath Algortihm
-            newCamExtractor = CameraGCodeExtraction.CameraGCodeExtraction(0.25,'T0')
             newCamExtractor.extractCameraGCode(f)
-            self._createCameraGrid(newCamExtractor.getCoordList(),0)
+            self._createCameraGrid(newCamExtractor.getCoordList(),1,50,50)
 
             for line in f:
                 #Extract the XML information for the SMD Parts
@@ -199,12 +204,12 @@ class OctoPNP(octoprint.plugin.StartupPlugin,
                 self._updateUI("FILE", "")
 
 
-    def _createCameraGrid(self,inputList,onLayer):
+    def _createCameraGrid(self,inputList,onLayer,CamResX,CamResY):
         Image = ImageOperations()
         Image.createBackgroundImage()
 
         #Creates a new CameraGridMaker Object with int Numbers for the Cam resolution
-        newGridMaker = CameraGridMaker(inputList,onLayer,50,50)
+        newGridMaker = CameraGridMaker(inputList,onLayer,CamResX,CamResY)
 
         #Execute all necessary operations to create the actual CameraGrid
         newGridMaker.getCoordinates()
@@ -221,8 +226,9 @@ class OctoPNP(octoprint.plugin.StartupPlugin,
         #Image.drawBoxFromCenter(int(centerX), int(centerY))
         # Resize the Image
         Image.resizeImage(1024, 1024)
-        Image.saveImage('Camera Grid')
-        Image.showImage()
+        #Image.saveImage('Camera Grid')
+        WindowText = "Suggested Camera Grid on Layer " + str(onLayer)
+        Image.showImage(WindowText)
 
 
     """
@@ -338,6 +344,12 @@ class OctoPNP(octoprint.plugin.StartupPlugin,
                 self._logger.info("Finished placing part " + str(self._currentPart))
                 self._state = self.STATE_NONE
                 return "G4 P1" # return dummy command
+
+    def _openGCodeFiles(self, inputName):
+        gcode = open( inputName, 'r' )
+        readData = gcode.readlines()
+        gcode.close()
+        return readData
 
 
     def _moveCameraToPart(self, partnr):
