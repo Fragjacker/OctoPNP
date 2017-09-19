@@ -34,9 +34,6 @@ import shutil
 from .SmdParts import SmdParts
 from .ImageProcessing import ImageProcessing
 
-from .GCode_processor import CameraGCodeExtraction as GCodex
-from .CameraCoordinateGetter import CameraGridMaker,ImageOperations
-
 
 __plugin_name__ = "OctoPNP"
 
@@ -76,10 +73,7 @@ class OctoPNP(octoprint.plugin.StartupPlugin,
 
 
     def on_after_startup(self):
-        self.imgproc = ImageProcessing(
-            float(self._settings.get(["tray", "boxsize"])),
-            int(self._settings.get(["camera", "bed", "binary_thresh"])),
-            int(self._settings.get(["camera", "head", "binary_thresh"])))
+        self.imgproc = ImageProcessing(float(self._settings.get(["tray", "boxsize"])), int(self._settings.get(["camera", "bed", "binary_thresh"])), int(self._settings.get(["camera", "head", "binary_thresh"])))
         #used for communication to UI
         self._pluginManager = octoprint.plugin.plugin_manager()
 
@@ -165,22 +159,10 @@ class OctoPNP(octoprint.plugin.StartupPlugin,
     def on_event(self, event, payload):
         #extraxt part informations from inline xmly
         if event == "FileSelected":
-            #Initilize the Cameraextractor Class
-            newCamExtractor = GCodex(0.25,'T0')
-            #Retrieve the basefolder for the GCode uploads
-            uploadsPath = self._settings.global_get_basefolder("uploads") + "\\" + payload.get("path")
-
             self._currentPart = None
             xml = "";
-            f = self._openGCodeFiles(uploadsPath)
-            #f = open(testPath, 'r')
-
-            #Extract the GCodes for the CameraPath Algortihm
-            newCamExtractor.extractCameraGCode(f)
-            self._createCameraGrid(newCamExtractor.getCoordList(),1,50,50)
-
+            f = open(payload.get("file"), 'r')
             for line in f:
-                #Extract the XML information for the SMD Parts
                 expression = re.search("<.*>", line)
                 if expression:
                     xml += expression.group() + "\n"
@@ -204,32 +186,6 @@ class OctoPNP(octoprint.plugin.StartupPlugin,
                 self._updateUI("FILE", "")
 
 
-    def _createCameraGrid(self,inputList,onLayer,CamResX,CamResY):
-        Image = ImageOperations()
-        Image.createBackgroundImage()
-
-        #Creates a new CameraGridMaker Object with int Numbers for the Cam resolution
-        newGridMaker = CameraGridMaker(inputList,onLayer,CamResX,CamResY)
-
-        #Execute all necessary operations to create the actual CameraGrid
-        newGridMaker.getCoordinates()
-        newGridMaker.drawGCodeLines(Image)
-        newGridMaker.createCameraLookUpGrid()
-        newGridMaker.drawAllFoundCameraPositions(Image)
-        newGridMaker.drawCameraLines(Image)
-
-        #Image.drawGridBox(0, 0, 50, 50)
-        #Draw Maximums and Minimums
-        Image.drawExtremaBounds()
-        #Draw Center of of the Extremes
-        #Image.drawCenterCircle(int(centerX), int(centerY))
-        #Image.drawBoxFromCenter(int(centerX), int(centerY))
-        # Resize the Image
-        Image.resizeImage(1024, 1024)
-        #Image.saveImage('Camera Grid')
-        WindowText = "Suggested Camera Grid on Layer " + str(onLayer)
-        Image.showImage(WindowText)
-
 
     """
     Use the gcode hook to interrupt the printing job on custom M361 commands.
@@ -246,6 +202,10 @@ class OctoPNP(octoprint.plugin.StartupPlugin,
                 self._currentPart = int(command[1:])
 
                 self._logger.info( "Received M361 command to place part: " + str(self._currentPart))
+
+                # pause running printjob to prevent octoprint from sending new commands from the gcode file during the interactive PnP process
+                if self._printer.is_printing():
+                    self._printer.pause_print()
 
                 self._updateUI("OPERATION", "pick")
 
@@ -343,13 +303,12 @@ class OctoPNP(octoprint.plugin.StartupPlugin,
 
                 self._logger.info("Finished placing part " + str(self._currentPart))
                 self._state = self.STATE_NONE
-                return "G4 P1" # return dummy command
 
-    def _openGCodeFiles(self, inputName):
-        gcode = open( inputName, 'r' )
-        readData = gcode.readlines()
-        gcode.close()
-        return readData
+                # resume paused printjob into normal operation
+                if self._printer.is_paused():
+                    self._printer.resume_print()
+
+                return "G4 P1" # return dummy command
 
 
     def _moveCameraToPart(self, partnr):
@@ -474,8 +433,8 @@ class OctoPNP(octoprint.plugin.StartupPlugin,
         self._logger.info("displacement - x: " + str(displacement[0]) + " y: " + str(displacement[1]))
 
         if(abs(orientation_offset) > 0.5):
-            self._updateUI("INFO", "Incorrect alignment, correcting offset of " + str(-orientation_offset) + "�")
-            self._logger.info("Incorrect alignment, correcting offset of " + str(-orientation_offset) + "�")
+            self._updateUI("INFO", "Incorrect alignment, correcting offset of " + str(-orientation_offset) + "°")
+            self._logger.info("Incorrect alignment, correcting offset of " + str(-orientation_offset) + "°")
             self._printer.commands("G92 E0")
             self._printer.commands("G1 E" + str(-orientation_offset) + " F" + str(self.FEEDRATE))
             # wait a second to execute the rotation
@@ -534,23 +493,23 @@ class OctoPNP(octoprint.plugin.StartupPlugin,
         self._printer.commands("G4 S1")
         for line in self._settings.get(["vacnozzle", "release_vacuum_gcode"]).splitlines():
             self._printer.commands(line)
-            self._printer.commands("G4 S1")
+        self._printer.commands("G4 S1")
 
     def _lowerVacuumNozzle(self):
-                self._printer.commands("M400")
-                self._printer.commands("M400")
-                self._printer.commands("G4 S1")
-                for line in self._settings.get(["vacnozzle", "lower_nozzle_gcode"]).splitlines():
-                    self._printer.commands(line)
-                    self._printer.commands("G4 S1")
+        self._printer.commands("M400")
+        self._printer.commands("M400")
+        self._printer.commands("G4 S1")
+        for line in self._settings.get(["vacnozzle", "lower_nozzle_gcode"]).splitlines():
+            self._printer.commands(line)
+            self._printer.commands("G4 S1")
 
     def _liftVacuumNozzle(self):
-            self._printer.commands("M400")
-            self._printer.commands("M400")
-            self._printer.commands("G4 S1")
-            for line in self._settings.get(["vacnozzle", "lift_nozzle_gcode"]).splitlines():
-                self._printer.commands(line)
-                self._printer.commands("G4 S1")
+        self._printer.commands("M400")
+        self._printer.commands("M400")
+        self._printer.commands("G4 S1")
+        for line in self._settings.get(["vacnozzle", "lift_nozzle_gcode"]).splitlines():
+            self._printer.commands(line)
+        self._printer.commands("G4 S1")
 
     def _grabImages(self, camera):
         result = True
