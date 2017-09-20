@@ -48,6 +48,12 @@ def __plugin_load__():
     global __plugin_hooks__
     __plugin_hooks__ = {'octoprint.comm.protocol.gcode.sending': octopnp.hook_gcode_sending, 'octoprint.comm.protocol.gcode.queuing': octopnp.hook_gcode_queuing}
 
+    global __plugin_helpers__
+    __plugin_helpers__ = dict(
+        get_head_camera_pxPerMM = octopnp._helper_get_head_camera_pxPerMM,
+        get_head_camera_image   = octopnp._helper_get_head_camera_image_xy # parameter: [x, y, callback, adjust_focus=True]
+    )
+
 
 class OctoPNP(octoprint.plugin.StartupPlugin,
             octoprint.plugin.TemplatePlugin,
@@ -57,10 +63,11 @@ class OctoPNP(octoprint.plugin.StartupPlugin,
             octoprint.plugin.SimpleApiPlugin,
             octoprint.plugin.BlueprintPlugin):
 
-    STATE_NONE = 0
-    STATE_PICK = 1
-    STATE_ALIGN = 2
-    STATE_PLACE = 3
+    STATE_NONE     = 0
+    STATE_PICK     = 1
+    STATE_ALIGN    = 2
+    STATE_PLACE    = 3
+    STATE_EXTERNAL = 9 # used if helper functions are called by external plugins
 
     FEEDRATE = 4000.000
 
@@ -69,7 +76,9 @@ class OctoPNP(octoprint.plugin.StartupPlugin,
     def __init__(self):
         self._state = self.STATE_NONE
         self._currentPart = 0
-        self._currentZ = None
+
+        # store callback to send result of an image capture request back to caller
+        self._helper_callback = None
 
 
     def on_after_startup(self):
@@ -106,6 +115,7 @@ class OctoPNP(octoprint.plugin.StartupPlugin,
                     "x": 0,
                     "y": 0,
                     "z": 0,
+                    "pxPerMM": 50.0,
                     "path": "",
                     "binary_thresh": 150,
                     "grabScriptPath": ""
@@ -194,10 +204,6 @@ class OctoPNP(octoprint.plugin.StartupPlugin,
         if "M361" in cmd:
             if self._state == self.STATE_NONE:
                 self._state = self.STATE_PICK
-                if self._printer.get_current_data()["currentZ"]:
-                    self._currentZ = float(self._printer.get_current_data()["currentZ"])
-                else:
-                    self._currentZ = 0.0
                 command = re.search("P\d*", cmd).group() #strip the M361
                 self._currentPart = int(command[1:])
 
@@ -209,7 +215,6 @@ class OctoPNP(octoprint.plugin.StartupPlugin,
 
                 self._updateUI("OPERATION", "pick")
 
-
                 self._logger.info( "Move camera to part: " + str(self._currentPart))
                 self._moveCameraToPart(self._currentPart)
 
@@ -217,15 +222,10 @@ class OctoPNP(octoprint.plugin.StartupPlugin,
                 self._printer.commands("G4 P1")
                 self._printer.commands("M400")
 
-                for i in range(5):
-                    self._printer.commands("G4 P1")
+                self._printer.commands("M362 OctoPNP")
 
-                self._printer.commands("M362")
 
-                for i in range(5):
-                    self._printer.commands("G4 P1")
-
-                return "G4 P1" # return dummy command
+                return (None,) # suppress command
             else:
                 self._logger.info( "ERROR, received M361 command while placing part: " + str(self._currentPart))
 
@@ -242,64 +242,43 @@ class OctoPNP(octoprint.plugin.StartupPlugin,
     """
 
     def hook_gcode_sending(self, comm_instance, phase, cmd, cmd_type, gcode, *args, **kwargs):
-        if "M362" in cmd:
+        if "M362 OctoPNP" in cmd:
             if self._state == self.STATE_PICK:
                 self._state = self.STATE_ALIGN
                 self._logger.info("Pick part " + str(self._currentPart))
 
-                for i in range(3):
-                    self._printer.commands("G4 P50")
+                # generate new imageProcessing object with updated settings
+                self.imgproc = ImageProcessing(float(self._settings.get(["tray", "boxsize"])), int(self._settings.get(["camera", "bed", "binary_thresh"])), int(self._settings.get(["camera", "head", "binary_thresh"])))
 
                 self._pickPart(self._currentPart)
                 self._printer.commands("M400")
                 self._printer.commands("G4 P1")
                 self._printer.commands("M400")
 
-                for i in range(5):
-                    self._printer.commands("G4 P1")
+                self._printer.commands("M362 OctoPNP")
 
-                self._printer.commands("M362")
-
-                for i in range(5):
-                    self._printer.commands("G4 P1")
-
-                return "G4 P1" # return dummy command
+                return (None,) # suppress command
 
             if self._state == self.STATE_ALIGN:
                 self._state = self.STATE_PLACE
                 self._logger.info("Align part " + str(self._currentPart))
-
-                for i in range(3):
-                    self._printer.commands("G4 P10")
 
                 self._alignPart(self._currentPart)
                 self._printer.commands("M400")
                 self._printer.commands("G4 P1")
                 self._printer.commands("M400")
 
-                for i in range(10):
-                    self._printer.commands("G4 P1")
+                self._printer.commands("M362 OctoPNP")
 
-                self._printer.commands("M362")
-
-                for i in range(5):
-                    self._printer.commands("G4 P1")
-
-                return "G4 P1" # return dummy command
+                return (None,) # suppress command
 
             if self._state == self.STATE_PLACE:
                 self._logger.info("Place part " + str(self._currentPart))
-
-                for i in range(3):
-                    self._printer.commands("G4 P10")
 
                 self._placePart(self._currentPart)
                 self._printer.commands("M400")
                 self._printer.commands("G4 P1")
                 self._printer.commands("M400")
-
-                for i in range(10):
-                    self._printer.commands("G4 P1")
 
                 self._logger.info("Finished placing part " + str(self._currentPart))
                 self._state = self.STATE_NONE
@@ -308,7 +287,35 @@ class OctoPNP(octoprint.plugin.StartupPlugin,
                 if self._printer.is_paused():
                     self._printer.resume_print()
 
-                return "G4 P1" # return dummy command
+                return (None,) # suppress command
+
+        # handle camera positioning for external request (helper function)
+        if "M362 OctoPNP_camera_external" in cmd:
+            result = self._grabImages("HEAD")
+
+            # the current printjob is resumed and octoPNP is set into default state
+            # before returning the obtained image by callback to allow recursive executions
+            # of the camera_helper by 3. party plugins (the camera helper is triggered from within the callback method).
+
+            # resume paused printjob into normal operation
+            if self._printer.is_paused():
+                self._printer.resume_print
+
+            # leave external state
+            self._state = self.STATE_NONE
+
+            if result:
+                if self._helper_callback:
+                    self._helper_callback(self._settings.get(["camera", "head", "path"]))
+            else:
+                if self._helper_callback:
+                    self._helper_callback(False)
+
+            if not self._helper_callback:
+                self._logger.info("Unable to return image to calling plugin, invalid callback")
+
+            # suppress the magic command (M365)
+            return (None,)
 
 
     def _moveCameraToPart(self, partnr):
@@ -319,7 +326,9 @@ class OctoPNP(octoprint.plugin.StartupPlugin,
         camera_offset = [tray_offset[0]-float(self._settings.get(["camera", "head", "x"])), tray_offset[1]-float(self._settings.get(["camera", "head", "y"])), float(self._settings.get(["camera", "head", "z"])) + tray_offset[2]]
         cmd = "G1 X" + str(camera_offset[0]) + " Y" + str(camera_offset[1]) + " F" + str(self.FEEDRATE)
         self._logger.info("Move camera to: " + cmd)
-        self._printer.commands("G1 Z" + str(self._currentZ+5) + " F" + str(self.FEEDRATE)) # lift printhead
+        self._printer.commands("G91") # relative positioning
+        self._printer.commands("G1 Z5 F" + str(self.FEEDRATE)) # lift printhead
+        self._printer.commands("G90") # absolute positioning
         self._printer.commands(cmd)
         self._printer.commands("G1 Z" + str(camera_offset[2]) + " F" + str(self.FEEDRATE)) # lower printhead
 
@@ -344,12 +353,12 @@ class OctoPNP(octoprint.plugin.StartupPlugin,
             if not part_offset:
                 self._updateUI("ERROR", self.imgproc.getLastErrorMessage())
                 part_offset = [0, 0]
+            else:
+                # update UI
+                self._updateUI("HEADIMAGE", self.imgproc.getLastSavedImagePath())
 
-            # update UI
-            self._updateUI("HEADIMAGE", self.imgproc.getLastSavedImagePath())
-
-            # Log image for debugging and documentation
-            if self._settings.get(["camera", "image_logging"]): self._saveDebugImage(headPath)
+                # Log image for debugging and documentation
+                if self._settings.get(["camera", "image_logging"]): self._saveDebugImage(headPath)
         else:
             cm_x=cm_y=0
             self._updateUI("ERROR", "Camera not ready")
@@ -396,7 +405,10 @@ class OctoPNP(octoprint.plugin.StartupPlugin,
             self._updateUI("BEDIMAGE", bedPath)
 
             # get rotation offset
-            orientation_offset = self.imgproc.getPartOrientation(bedPath, 0)
+            orientation_offset = self.imgproc.getPartOrientation(bedPath, float(self._settings.get(["camera", "bed", "pxPerMM"])), 0)
+            if not orientation_offset:
+                self._updateUI("ERROR", self.imgproc.getLastErrorMessage())
+                orientation_offset = 0.0
             # update UI
             self._updateUI("BEDIMAGE", self.imgproc.getLastSavedImagePath())
 
@@ -420,18 +432,28 @@ class OctoPNP(octoprint.plugin.StartupPlugin,
         bedPath = self._settings.get(["camera", "bed", "path"])
         if self._grabImages("BED"):
 
-            orientation_offset = self.imgproc.getPartOrientation(bedPath, destination[3])
+            orientation_offset = self.imgproc.getPartOrientation(bedPath, float(self._settings.get(["camera", "bed", "pxPerMM"])), destination[3])
+            if not orientation_offset:
+                self._updateUI("ERROR", self.imgproc.getLastErrorMessage())
+                orientation_offset = 0.0
+
             displacement = self.imgproc.getPartPosition(bedPath, float(self._settings.get(["camera", "bed", "pxPerMM"])))
+            if not displacement:
+                self._updateUI("ERROR", self.imgproc.getLastErrorMessage())
+                displacement = [0, 0]
+
             #update UI
             self._updateUI("BEDIMAGE", self.imgproc.getLastSavedImagePath())
-
+			
             # Log image for debugging and documentation
-            if self._settings.get(["camera", "image_logging"]): self._saveDebugImage(bedPath)
-        else:
-            self._updateUI("ERROR", "Camera not ready")
+            if self._settings.get(["camera", "image_logging"]):
+                self._saveDebugImage(bedPath)
+            else:
+                self._updateUI("ERROR", "Camera not ready")
 
         self._logger.info("displacement - x: " + str(displacement[0]) + " y: " + str(displacement[1]))
 
+        # Double check whether orientation is now correct. Important on unreliable hardware...
         if(abs(orientation_offset) > 0.5):
             self._updateUI("INFO", "Incorrect alignment, correcting offset of " + str(-orientation_offset) + "°")
             self._logger.info("Incorrect alignment, correcting offset of " + str(-orientation_offset) + "°")
@@ -452,19 +474,20 @@ class OctoPNP(octoprint.plugin.StartupPlugin,
                 self._updateUI("ERROR", "Camera not ready")
 
         # move to destination
+        dest_z = destination[2]+self.smdparts.getPartHeight(partnr)-float(self._settings.get(["vacnozzle", "z_pressure"]))
         cmd = "G1 X" + str(destination[0]-float(self._settings.get(["vacnozzle", "x"]))+displacement[0]) \
               + " Y" + str(destination[1]-float(self._settings.get(["vacnozzle", "y"]))+displacement[1]) \
-              + " Z" + str(destination[2]+self.smdparts.getPartHeight(partnr)+10+abs(float(self._settings.get(["vacnozzle", "z_pressure"])))) + " F" + str(self.FEEDRATE)
+              + " F" + str(self.FEEDRATE)
         self._logger.info("object destination: " + cmd)
-        self._printer.commands("G1 Z" + str(destination[2]+self.smdparts.getPartHeight(partnr)+5) + " F" + str(self.FEEDRATE)) # lift printhead
+        self._printer.commands("G1 Z" + str(dest_z+10) + " F" + str(self.FEEDRATE)) # lift printhead
         self._printer.commands(cmd)
-        self._printer.commands("G1 Z" + str(destination[2]+self.smdparts.getPartHeight(partnr)-float(self._settings.get(["vacnozzle", "z_pressure"]))))
+        self._printer.commands("G1 Z" + str(dest_z))
 
         #release part
         self._releaseVacuum()
         self._printer.commands("G4 S2") #some extra time to make sure the part has released and the remaining vacuum is gone
-
-        self._printer.commands("G1 Z" + str(destination[2]+self.smdparts.getPartHeight(partnr)+5) + " F" + str(self.FEEDRATE)) # lift printhead againi
+        self._printer.commands("G1 Z" + str(dest_z+10) + " F" + str(self.FEEDRATE)) # lift printhead again
+        self._liftVacuumNozzle()
 
     # get the position of the box (center of the box) containing part x relative to the [0,0] corner of the tray
     def _getTrayPosFromPartNr(self, partnr):
@@ -501,7 +524,7 @@ class OctoPNP(octoprint.plugin.StartupPlugin,
         self._printer.commands("G4 S1")
         for line in self._settings.get(["vacnozzle", "lower_nozzle_gcode"]).splitlines():
             self._printer.commands(line)
-            self._printer.commands("G4 S1")
+        self._printer.commands("G4 S1")
 
     def _liftVacuumNozzle(self):
         self._printer.commands("M400")
@@ -589,3 +612,55 @@ class OctoPNP(octoprint.plugin.StartupPlugin,
             data=data
         )
         self._pluginManager.send_plugin_message("OctoPNP", message)
+
+
+
+    # Helper function to provide camera access to other plugins.
+    # Returns resolution for 'camera' (HEAD or BED).
+    def _helper_get_head_camera_pxPerMM(self, camera):
+        if camera == "HEAD":
+            return self._settings.get(["camera", "head", "pxPerMM"])
+        if camera == "BED":
+            return self._settings.get(["camera", "bed", "pxPerMM"])
+        return 0.0
+
+
+    # Helper function to provide camera access to other plugins.
+    # Moves printhead with camera to given x/y coordinates, takes
+    # a picture and returns by invoking the callback function.
+    # Can only be used for the head camera, since bed camera is fixed and can't be moved to a x/y coordinate.
+    #
+    # adjust_focus: add camera focus distance to current z position.
+    # Can be disabled to take multiple shots without moving the z-axis
+    def _helper_get_head_camera_image_xy(self, x, y, callback, adjust_focus=True):
+        result = False;
+
+        self._logger.info("Trying to take image at pos [" + str(x) + ":" + str(y) + "] for external plugin")
+
+        if self._state == self.STATE_NONE:
+            self._state = self.STATE_EXTERNAL
+            result = True
+            if self._printer.is_printing(): # interrupt running printjobs to prevent octoprint from sending further gcode lines from the file
+                self._printer.pause_print()
+
+
+            # store callback
+            self._helper_callback = callback
+
+            target_position = [x-float(self._settings.get(["camera", "head", "x"])), y-float(self._settings.get(["camera", "head", "y"])), float(self._settings.get(["camera", "head", "z"]))]
+            cmd = "G1 X" + str(target_position[0]) + " Y" + str(target_position[1]) + " F" + str(self.FEEDRATE)
+            if adjust_focus:
+                self._printer.commands("G91") # relative positioning
+                self._printer.commands("G1 Z" + str(target_position[2]) + " F" + str(self.FEEDRATE)) # lift printhead
+                self._printer.commands("G90") # absolute positioning
+            self._printer.commands(cmd)
+
+            self._printer.commands("M400")
+            self._printer.commands("G4 P1")
+            self._printer.commands("M400")
+            self._printer.commands("M362 OctoPNP_camera_external")
+
+        else:
+            self._logger.info("Abort, OctoPNP is busy (not in state NONE, current state: " + str(self._state) + ")")
+
+        return result
