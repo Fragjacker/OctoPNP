@@ -5,7 +5,7 @@ Created on 02.01.2018
 '''
 import cv2
 import numpy as np
-
+import image_binarizer as ib
 
 class ImageAnalyzer:
     
@@ -14,13 +14,15 @@ class ImageAnalyzer:
     @param Image: Must be a greyscale Image
     @param infoDict: A dictionary that contains necessary constants from OctoCamDox 
     """
-    def __init__(self, Image, infoDict):
-        self.inputImage = Image
+    def __init__(self, infoDict):
+        self.imagePath = 'Komplette_Drucke/result_battery_cube_2017-11-28/Layer_7.png'
+        self.inputImage = self.binarizeImage()
         # Get the dimension of the Image
         self.Imageheight,self.Imagewidth = self.inputImage.shape
         
         # Specifiy the radius of the Region of Interest
         self.ROI_radius = infoDict["radius"]
+        self.qualityLevel = infoDict["qlevel"]
         self.originX = None
         self.originY = None
         
@@ -103,9 +105,9 @@ class ImageAnalyzer:
                 currMaxPix, currWhitePix, __ = self.countPixelsAtPosition(x, y)
                 currQuality = self.circuitQualityChecker(currMaxPix, currWhitePix)
                 
-                if(currQuality >= 50.0):
+                if(currQuality >= self.qualityLevel):
                     cv2.rectangle( img, (x-self.ROI_radius/2,y-self.ROI_radius/2), (x+self.ROI_radius/2,y+self.ROI_radius/2), ( 0, 255, 0 ), thickness=-1 )
-                elif(currQuality < 50.0):
+                elif(currQuality < self.qualityLevel):
                     cv2.rectangle( img, (x-self.ROI_radius/2,y-self.ROI_radius/2), (x+self.ROI_radius/2,y+self.ROI_radius/2), ( 0, 0, 255 ), thickness=-1 )
                 
                 x += self.ROI_radius
@@ -113,11 +115,17 @@ class ImageAnalyzer:
             y += self.ROI_radius
             
         print("DONE!")
+        # TODO: Remove the image saving when embedding into OctoPNP
         cv2.imwrite( "AnalyzedImage" + '.png', img )
+    
+    def binarizeImage(self):
+        binImg = ib.imageBinarizer(cv2.imread(self.imagePath,0))
+        binImg.processImage()
+        return binImg.getResultImage()
         
 
-values = dict(radius = 10, tileCenterX = 50.0, tileCenterY = 50.0, tileWidthX = 10.0, tileWidthY = 10.0, campixelWidthX = 880,campixelWidthY = 880)
-Image = ImageAnalyzer(cv2.imread('binary_Layer7.png',0), values)
+values = dict(radius = 10, qlevel = 50.0, tileCenterX = 50.0, tileCenterY = 50.0, tileWidthX = 10.0, tileWidthY = 10.0, campixelWidthX = 880,campixelWidthY = 880)
+Image = ImageAnalyzer(values)
 # position = [values["radius"],values["radius"]]
 # print(Image.countPixelsAtPosition(position[0],position[1]))
 # maxPix, whitePix, __ = Image.countPixelsAtPosition(position[0],position[1])

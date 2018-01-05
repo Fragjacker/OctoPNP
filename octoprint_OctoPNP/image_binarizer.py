@@ -98,6 +98,6 @@ class imageBinarizer:
         return self.bin_img;
         
 
-Image = imageBinarizer(cv2.imread('Komplette_Drucke/result_battery_cube_2017-11-28/Layer_7.png',0))
-Image.processImage()
-Image.saveImage('binary_Layer7', '.png')
+# Image = imageBinarizer(cv2.imread('Komplette_Drucke/result_battery_cube_2017-11-28/Layer_7.png',0))
+# Image.processImage()
+# Image.saveImage('binary_Layer7', '.png')
